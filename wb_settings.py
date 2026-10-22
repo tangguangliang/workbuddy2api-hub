@@ -1410,6 +1410,47 @@ def set_ui_language(accounts_dir, value):
     return value
 
 
+REALM_ALIASES_KEY = "realm_model_aliases"
+# 出口替身模型：`{"gpt-5.5": "deepseek-v4.1-flash", "*": "deepseek-v4.1-flash"}`。
+# 只在「请求的模型这个出口不提供」时生效（判定见 wb_proxy.realm_alias_for），
+# 精确 id 优先，`*` 兜底。典型用途：VS Code 的 Codex agent 只能从 Codex 自己的
+# 目录（gpt-5.x 等）里挑模型，而国内版出口一个都不提供，又没有地方填国内版模型名。
+REALM_ALIAS_MAX = 200
+
+
+def _clean_realm_aliases(value):
+    """{model: stand-in} with trimmed keys/values; anything else is dropped."""
+    if not isinstance(value, dict):
+        return {}
+    out = {}
+    for key, val in list(value.items())[:REALM_ALIAS_MAX]:
+        if not isinstance(key, str) or not isinstance(val, str):
+            continue
+        key = key.strip()
+        val = val.strip()
+        if key and val:
+            out[key] = val
+    return out
+
+
+def realm_model_aliases(accounts_dir):
+    """Configured per-exit stand-in models; empty dict when not configured."""
+    return _clean_realm_aliases(load(accounts_dir).get(REALM_ALIASES_KEY))
+
+
+def set_realm_model_aliases(accounts_dir, mapping):
+    """Persist the stand-in map. An empty map removes the key entirely."""
+    clean = _clean_realm_aliases(mapping)
+    with _lock:
+        data = load(accounts_dir)
+        if clean:
+            data[REALM_ALIASES_KEY] = clean
+        else:
+            data.pop(REALM_ALIASES_KEY, None)
+        save(accounts_dir, data)
+    return clean
+
+
 UPSTREAM_DEFAULTS = {
     "header_timeout_seconds": 120,
     "idle_timeout_seconds": 300,
