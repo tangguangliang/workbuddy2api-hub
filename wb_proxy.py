@@ -255,6 +255,46 @@ def exclusive_realm(model_id):
     if m in CN_EXCLUSIVE or m.startswith(CN_EXCLUSIVE_PREFIXES):
         return "cn"
     return ""
+
+
+def realm_alias_for(model, realm):
+    """Stand-in model for a model the requested exit cannot serve.
+
+    VS Code's Codex agent picks its model from Codex's own catalogue
+    (`gpt-5.5`, `gpt-6-sol` ...) and has nowhere to type a domestic model id,
+    so every one of its requests used to die on the realm self-check. The
+    `realm_model_aliases` map in settings.json stands a servable model in for
+    such a request (exact id first, then `*`). An empty result means "no
+    rewrite": the request keeps its original model and the caller explains the
+    mismatch as before.
+
+    The stand-in must itself be servable by that exit - pointing a domestic
+    request at another international-only model would only move the failure.
+    It is also only used when the exit that serves the requested model has no
+    usable account right now: with an international account in place the honest
+    answer is "switch the key's exit", not a silent downgrade.
+    """
+    if not model or not realm:
+        return ""
+    try:
+        aliases = wb_settings.realm_model_aliases(ACCOUNTS_DIR)
+    except Exception:
+        return ""
+    if not aliases:
+        return ""
+    target = aliases.get(str(model)) or aliases.get("*") or ""
+    if not target or target == model:
+        return ""
+    owner = exclusive_realm(target)
+    if owner and owner != realm:
+        return ""
+    if POOL is not None:
+        try:
+            if POOL.count_ready(realm=exclusive_realm(model)):
+                return ""
+        except Exception:
+            pass
+    return target
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 def install_console_close_handler():
@@ -21427,6 +21467,29 @@ class Handler(BaseHTTPRequestHandler):
         rows written before the key field existed.
         """
         return (self.key_entry or {}).get("id") or None
+    def _apply_realm_model_alias(self, realm, *bodies):
+        """Rewrite a cross-exit model in place; return the stand-in or "".
+
+        Called before the upstream body is built, so every downstream consumer
+        (upstream request, usage row, logs) sees the model that will actually
+        run. The rewrite is logged because it changes what the client asked
+        for - a silent substitution would make billing and latency puzzling.
+        """
+        model = ""
+        for body in bodies:
+            if isinstance(body, dict) and isinstance(body.get("model"), str):
+                model = body["model"]
+                break
+        target = realm_alias_for(model, realm)
+        if not target:
+            return ""
+        for body in bodies:
+            if isinstance(body, dict) and "model" in body:
+                body["model"] = target
+        log("realm alias: %s -> %s (exit %s): this exit does not serve %s"
+            % (model, target, realm, model))
+        return target
+
     def _cross_realm_error(self, model, realm):
         """Explain a model/exit mismatch instead of letting upstream reject it.
         Sending gpt-6-astra to the domestic exit (or deepseek-v4-pro to the
@@ -25861,6 +25924,10 @@ class Handler(BaseHTTPRequestHandler):
         custom_names = custom_tool_names(all_tools)
         chat_req = responses_to_chat(payload, compaction=compaction)
         ns_map = chat_req.pop("_namespace_map", None)
+        explicit_realm = self._request_realm()
+        req_realm = explicit_realm or CURRENT_REALM
+        # 两个 body 都要改：payload 决定日志与用量，chat_req 才是发给上游的那份。
+        self._apply_realm_model_alias(req_realm, payload, chat_req)
         # Echo these back on the response object; see chat_to_response.
         request_meta = {
             "tools": all_tools,
@@ -25884,8 +25951,6 @@ class Handler(BaseHTTPRequestHandler):
                sorted(custom_names) or "-", compaction, key_label(self._key_id()) or "-")
         )
         try:
-            explicit_realm = self._request_realm()
-            req_realm = explicit_realm or CURRENT_REALM
             blocked = self._cross_realm_error(chat_req.get("model"), req_realm)
             if blocked:
                 return self._error(400, blocked, "invalid_request_error")
@@ -26227,6 +26292,9 @@ class Handler(BaseHTTPRequestHandler):
             chat_req = messages_to_chat(payload)
         except ValueError as exc:
             return self._anthropic_error(400, str(exc), "invalid_request_error")
+        explicit_realm = self._request_realm()
+        req_realm = explicit_realm or CURRENT_REALM
+        self._apply_realm_model_alias(req_realm, chat_req, payload)
         model = chat_req.get("model") or "unknown"
         want_stream = bool(chat_req.get("stream"))
         session_key = extract_session_key(self.headers, chat_req)
@@ -26241,8 +26309,6 @@ class Handler(BaseHTTPRequestHandler):
                chat_req.get("reasoning_effort"), len(chat_req.get("tools") or []),
                key_label(self._key_id()) or "-"))
         try:
-            explicit_realm = self._request_realm()
-            req_realm = explicit_realm or CURRENT_REALM
             blocked = self._cross_realm_error(chat_req.get("model"), req_realm)
             if blocked:
                 return self._anthropic_error(400, blocked, "invalid_request_error")
@@ -26684,6 +26750,10 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/v1/responses", "/responses",
                     "/v1/responses/compact", "/responses/compact"):
             return self._handle_responses(payload)
+        # 出口替身：必须在 build_upstream_body 之前改写，否则线上请求体还是旧模型。
+        explicit_realm = self._request_realm()
+        req_realm = explicit_realm or CURRENT_REALM
+        self._apply_realm_model_alias(req_realm, payload)
         # Diagnostics: what the client actually asked for, and what we forward.
         # Only the knobs that change behaviour are logged - never message text.
         session_key = extract_session_key(self.headers, payload)
