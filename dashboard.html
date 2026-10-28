@@ -1360,6 +1360,12 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
   opacity:0;transform:translateY(-4px) scale(.985);pointer-events:none;
   transition:opacity .13s ease,transform .13s ease;
   scrollbar-width:thin}
+/* 展开层挂到 <body> 上并用 fixed 定位：留在 .cs-wrap 里时，卡片 / 表格 /
+   滚动容器的 overflow 会把它裁掉，表现为「下拉只能在输入框那一小块里滚」。
+   z-index 高于 .modal-mask(100) 与 #panelGate(600)，低于 toast/hoverTip。 */
+.cs-panel.cs-fixed{position:fixed;z-index:1000;top:auto;bottom:auto;left:0;
+  min-width:0;max-width:none}
+.cs-panel.cs-open{opacity:1;transform:none;pointer-events:auto}
 .cs-wrap.cs-open .cs-panel{opacity:1;transform:none;pointer-events:auto}
 .cs-wrap.cs-drop-up .cs-panel{transform:translateY(4px) scale(.985)}
 .cs-wrap.cs-drop-up.cs-open .cs-panel{transform:none}
@@ -21666,6 +21672,10 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
 
   var openWrap = null;
 
+  function panelOf(wrap){
+    return wrap && wrap.__csPanel ? wrap.__csPanel : null;
+  }
+
   function labelOf(sel){
     var o = sel.options[sel.selectedIndex];
     return o ? (o.textContent || o.text || '') : '';
@@ -21674,6 +21684,8 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
   function closeWrap(wrap){
     if (!wrap) return;
     wrap.classList.remove('cs-open');
+    var panel = panelOf(wrap);
+    if (panel) panel.classList.remove('cs-open');
     var trg = wrap.querySelector('.cs-trigger');
     if (trg) trg.setAttribute('aria-expanded','false');
     if (openWrap === wrap) openWrap = null;
@@ -21689,7 +21701,8 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
     var txt = labelOf(sel);
     v.textContent = txt;
     v.classList.toggle('cs-placeholder', !txt);
-    var opts = wrap.querySelectorAll('.cs-opt');
+    var panel = panelOf(wrap);
+    var opts = panel ? panel.querySelectorAll('.cs-opt') : [];
     for (var i = 0; i < opts.length; i++){
       opts[i].classList.toggle('cs-selected', i === sel.selectedIndex);
       opts[i].setAttribute('aria-selected', i === sel.selectedIndex ? 'true' : 'false');
@@ -21697,12 +21710,27 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
   }
 
   function buildPanel(sel, wrap){
-    var panel = wrap.querySelector('.cs-panel');
+    var panel = panelOf(wrap);
     if (!panel){
       panel = document.createElement('div');
-      panel.className = 'cs-panel';
+      panel.className = 'cs-panel cs-fixed';
       panel.setAttribute('role','listbox');
-      wrap.appendChild(panel);
+      /* Portal 到 <body>：卡片 / 表格 / 滚动容器的 overflow 会裁掉展开层。 */
+      document.body.appendChild(panel);
+      wrap.__csPanel = panel;
+      panel.__csWrap = wrap;
+      panel.addEventListener('click', function(e){
+        var row = e.target.closest ? e.target.closest('.cs-opt') : null;
+        if (row && !row.classList.contains('cs-disabled')){
+          pick(sel, wrap, parseInt(row.getAttribute('data-idx'), 10));
+        }
+      });
+      panel.addEventListener('mousemove', function(e){
+        var row = e.target.closest ? e.target.closest('.cs-opt') : null;
+        if (!row) return;
+        var rows = panel.querySelectorAll('.cs-opt');
+        for (var i = 0; i < rows.length; i++) rows[i].classList.toggle('cs-hover', rows[i] === row);
+      });
     }
     panel.textContent = '';
     var n = sel.options.length;
@@ -21732,10 +21760,31 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
   }
 
   function positionPanel(wrap){
+    var panel = panelOf(wrap);
+    if (!panel) return;
     var r = wrap.getBoundingClientRect();
-    var below = window.innerHeight - r.bottom;
-    var need = Math.min(320, window.innerHeight * 0.52);
-    var up = below < need && r.top > below;
+    var vw = window.innerWidth || 0;
+    var vh = window.innerHeight || 0;
+    var gap = 4, edge = 8;
+    var width = Math.max(0, Math.min(Math.round(r.width),
+                                     Math.min(320, vw - edge * 2)));
+    var left = Math.min(Math.max(Math.round(r.left), edge),
+                        Math.max(edge, vw - width - edge));
+    var cap = Math.min(320, Math.round(vh * 0.52));
+    var below = vh - r.bottom - gap - edge;
+    var above = r.top - gap - edge;
+    var up = below < Math.min(cap, 180) && above > below;
+    var maxH = Math.max(96, Math.min(cap, up ? above : below));
+    panel.style.width = width + 'px';
+    panel.style.left = left + 'px';
+    panel.style.maxHeight = maxH + 'px';
+    if (up){
+      panel.style.top = 'auto';
+      panel.style.bottom = Math.max(0, Math.round(vh - r.top + gap)) + 'px';
+    } else {
+      panel.style.bottom = 'auto';
+      panel.style.top = Math.max(0, Math.round(r.bottom + gap)) + 'px';
+    }
     wrap.classList.toggle('cs-drop-up', up);
     var panel = wrap.querySelector('.cs-panel');
     if (panel){
@@ -21775,11 +21824,12 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
     positionPanel(wrap);
     placePanel(wrap);
     wrap.classList.add('cs-open');
+    var panel = panelOf(wrap);
+    if (panel) panel.classList.add('cs-open');
     openWrap = wrap;
     var trg = wrap.querySelector('.cs-trigger');
     if (trg) trg.setAttribute('aria-expanded','true');
     var sel = wrap.querySelector('select');
-    var panel = wrap.querySelector('.cs-panel');
     if (panel && sel){
       var cur = panel.children[sel.selectedIndex];
       if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: 'nearest' });
@@ -21855,7 +21905,8 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
     });
 
     trg.addEventListener('keydown', function(e){
-      var panel = wrap.querySelector('.cs-panel');
+      var panel = panelOf(wrap);
+      if (!panel) return;
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp'){
         e.preventDefault();
         if (!wrap.classList.contains('cs-open')) openWrap_(wrap);
@@ -21880,21 +21931,7 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
       }
     });
 
-    wrap.addEventListener('click', function(e){
-      var row = e.target.closest ? e.target.closest('.cs-opt') : null;
-      if (row && !row.classList.contains('cs-disabled')){
-        pick(sel, wrap, parseInt(row.getAttribute('data-idx'), 10));
-      }
-    });
-
-    wrap.addEventListener('mousemove', function(e){
-      var row = e.target.closest ? e.target.closest('.cs-opt') : null;
-      if (!row) return;
-      var panel = wrap.querySelector('.cs-panel');
-      var rows = panel.querySelectorAll('.cs-opt');
-      for (var i = 0; i < rows.length; i++) rows[i].classList.toggle('cs-hover', rows[i] === row);
-    });
-
+    /* 行点击 / 悬停绑在面板自己身上：面板 portal 到了 <body>，不再经过 wrap 冒泡 */
     /* 外部数据改了 options（例如账号列表刷新）时重建面板 */
     if (typeof MutationObserver !== 'undefined'){
       new MutationObserver(function(){
@@ -21917,13 +21954,30 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
     sel.addEventListener('change', function(){ syncLabel(sel, wrap); });
   }
 
+  /* 页面重渲染会连同 wrap 一起删掉 select，面板挂在 <body> 上不会跟着走：
+     每次扫描前先清掉孤儿面板，避免越积越多。 */
+  function prunePanels(){
+    var panels = document.querySelectorAll('.cs-panel');
+    for (var i = 0; i < panels.length; i++){
+      var w = panels[i].__csWrap;
+      if (!w || !document.body.contains(w)){
+        if (panels[i].parentNode) panels[i].parentNode.removeChild(panels[i]);
+      }
+    }
+  }
+
   function scan(root){
+    prunePanels();
     var list = (root || document).querySelectorAll('select');
     for (var i = 0; i < list.length; i++) enhance(list[i]);
   }
 
   document.addEventListener('click', function(e){
-    if (openWrap && !openWrap.contains(e.target)) closeWrap(openWrap);
+    if (!openWrap) return;
+    var panel = panelOf(openWrap);
+    if (openWrap.contains(e.target)) return;
+    if (panel && panel.contains(e.target)) return;
+    closeWrap(openWrap);
   }, true);
 
   document.addEventListener('keydown', function(e){

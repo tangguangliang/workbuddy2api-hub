@@ -78,6 +78,22 @@ ok('选中态与禁用态有独立样式', () => {
   assert.ok(html.includes('.cs-opt.cs-disabled'), 'missing disabled style');
 });
 
+ok('展开层 portal 到 body 并用 fixed 定位（不被父容器 overflow 裁掉）', () => {
+  // 回归背景：面板留在 .cs-wrap 里时，卡片 / 表格 / 滚动容器的 overflow
+  // 会把展开层裁掉，只能在下拉框那一小块里滚动（智能体配置页实测）。
+  const rule = html.match(/\.cs-panel\.cs-fixed\{([^}]*)\}/);
+  assert.ok(rule, 'missing .cs-panel.cs-fixed rule');
+  assert.ok(/position:\s*fixed/.test(rule[1]), 'portal panel must be position:fixed');
+  assert.ok(script.includes('document.body.appendChild(panel)'),
+    'panel must be portaled to <body>');
+  assert.ok(script.includes('function panelOf'),
+    'panel lookups must not rely on the wrapper subtree');
+  assert.ok(script.includes("panel.classList.add('cs-open')"),
+    'open state must also be toggled on the portaled panel');
+  assert.ok(script.includes('panel.__csWrap = wrap'),
+    'panel must remember its wrapper so orphans can be pruned');
+});
+
 /* ── 2. JS 结构契约 ─────────────────────────────────────────── */
 
 ok('增强逻辑只包一次，重复注入不会双层包裹', () => {
