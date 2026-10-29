@@ -265,6 +265,13 @@ def realm_alias_for(model, realm):
     It is also only used when the exit that serves the requested model has no
     usable account right now: with an international account in place the honest
     answer is "switch the key's exit", not a silent downgrade.
+
+    A model no exit serves at all (Codex's internal `codex-auto-review`, a
+    typo, a model that was retired upstream) has no owning exit, so that
+    readiness guard does not apply: without the rewrite the request is a
+    guaranteed `11102 service info not found`, and the `*` entry is the only
+    way to keep such a call alive. Only a named model whose exit is genuinely
+    available is left alone.
     """
     if not model or not realm:
         return ""
@@ -280,9 +287,10 @@ def realm_alias_for(model, realm):
     owner = exclusive_realm(target)
     if owner and owner != realm:
         return ""
-    if POOL is not None:
+    model_owner = exclusive_realm(model)
+    if model_owner and POOL is not None:
         try:
-            if POOL.count_ready(realm=exclusive_realm(model)):
+            if POOL.count_ready(realm=model_owner):
                 return ""
         except Exception:
             pass

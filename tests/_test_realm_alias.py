@@ -102,6 +102,24 @@ class RealmAliasTests(unittest.TestCase):
         P.POOL = FakePool(0)
         self.assertEqual(P.realm_alias_for("gpt-5.5", "cn"), "deepseek-v4.1-flash")
 
+    def test_model_no_exit_serves_is_aliased_even_with_accounts(self):
+        # Codex 的内部模型 codex-auto-review（以及拼错的、上游下线的模型名）没有
+        # 任何出口提供它，所以「拥有它的出口有没有账号」并不适用：不改写就一定是
+        # 上游 11102 service info not found。这里曾经用 count_ready(realm="")
+        # 判断，任何账号都能满足它，于是 Codex 的自动审核调用永远拿不到替身、
+        # 每次都 400，写文件被自动审核直接拒掉。
+        self.alias({"*": "deepseek-v4.1-flash"})
+        P.POOL = FakePool(2)
+        self.assertEqual(P.realm_alias_for("codex-auto-review", "cn"),
+                         "deepseek-v4.1-flash")
+        self.assertEqual(P.realm_alias_for("definitely-not-a-model", "cn"),
+                         "deepseek-v4.1-flash")
+
+    def test_unknown_model_without_a_map_entry_is_untouched(self):
+        self.alias({"gpt-5.5": "deepseek-v4.1-flash"})
+        P.POOL = FakePool(0)
+        self.assertEqual(P.realm_alias_for("codex-auto-review", "cn"), "")
+
     # -- what the handler does with it -------------------------------------
     def test_handler_rewrites_every_body_it_is_given(self):
         self.alias({"*": "deepseek-v4.1-flash"})
