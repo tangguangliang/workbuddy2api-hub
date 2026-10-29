@@ -257,6 +257,41 @@ def exclusive_realm(model_id):
     return ""
 
 
+_realm_models_cache = {"at": 0.0, "data": {}}
+_REALM_MODELS_TTL = 60.0
+
+
+def realm_served_models(realm):
+    """该出口目录认识的模型 id（小写），静态快照 + 已落盘的远程目录。
+
+    和 `merge_catalog()` 同源，只读本地：`/v1/models` 宣告什么，这里就是什么。
+    出口替身靠它区分「这个模型当前出口就有」和「谁都没有」——两者完全不同：
+    前者绝不能改写（用户主动选了它），后者不改写就一定是上游 11102。
+    """
+    r = "cn" if str(realm or "").strip().lower() == "cn" else "intl"
+    now = time.time()
+    hit = _realm_models_cache["data"].get(r)
+    if hit is not None and (now - _realm_models_cache["at"]) < _REALM_MODELS_TTL:
+        return hit
+    ids = set()
+    source = getattr(wb_catalog,
+                     "STATIC_CN_MODELS" if r == "cn" else "STATIC_INTL_MODELS", []) or []
+    for item in source:
+        mid = item.get("id") if isinstance(item, dict) else None
+        if isinstance(mid, str) and mid.strip():
+            ids.add(mid.strip().lower())
+    try:
+        cached = read_cached_remote_catalog(r)
+        for mid in ((cached[1] if cached else {}) or {}):
+            if str(mid).strip():
+                ids.add(str(mid).strip().lower())
+    except Exception:
+        pass
+    _realm_models_cache["data"][r] = ids
+    _realm_models_cache["at"] = now
+    return ids
+
+
 def realm_alias_for(model, realm):
     """Stand-in model for a model the requested exit cannot serve.
 
@@ -280,6 +315,12 @@ def realm_alias_for(model, realm):
     guaranteed `11102 service info not found`, and the `*` entry is the only
     way to keep such a call alive. Only a named model whose exit is genuinely
     available is left alone.
+
+    The first check is the important one: a model the *current* exit's catalogue
+    serves is never rewritten, whatever `*` says. "No owning exit" is not the
+    same as "nobody serves it" - `glm-5.3`, `hy3` and the rest are shared, they
+    simply have no exclusive owner, and rewriting them would silently ignore the
+    model the user picked.
     """
     if not model or not realm:
         return ""
@@ -291,6 +332,8 @@ def realm_alias_for(model, realm):
         return ""
     target = aliases.get(str(model)) or aliases.get("*") or ""
     if not target or target == model:
+        return ""
+    if str(model).strip().lower() in realm_served_models(realm):
         return ""
     owner = exclusive_realm(target)
     if owner and owner != realm:

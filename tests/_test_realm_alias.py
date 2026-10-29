@@ -120,6 +120,25 @@ class RealmAliasTests(unittest.TestCase):
         P.POOL = FakePool(0)
         self.assertEqual(P.realm_alias_for("codex-auto-review", "cn"), "")
 
+    def test_shared_models_of_this_exit_are_never_rewritten(self):
+        # 回归：曾把「没有独占归属」当成「没人提供」，于是 glm-5.3 / hy3 这些
+        # 两个出口都有的模型也被 `*` 改写成 deepseek-v4.1-flash —— 用户在下拉里
+        # 选了 glm-5.3，实际跑的却是 deepseek。
+        # 只挑内置快照里就有的模型：space-bunny 这类只出现在远程目录的模型
+        # 在测试里没有缓存可读，交给线上路径去保证。
+        self.alias({"*": "deepseek-v4.1-flash"})
+        P.POOL = FakePool(2)
+        for model in ("glm-5.3", "hy3", "deepseek-v4.1-flash"):
+            self.assertEqual(P.realm_alias_for(model, "cn"), "", model)
+
+    def test_catalog_knows_which_exit_serves_what(self):
+        cn = P.realm_served_models("cn")
+        intl = P.realm_served_models("intl")
+        self.assertIn("glm-5.3", cn)
+        self.assertIn("deepseek-v4.1-flash", cn)
+        self.assertNotIn("gpt-5.5", cn)
+        self.assertIn("gpt-5.5", intl)
+
     # -- what the handler does with it -------------------------------------
     def test_handler_rewrites_every_body_it_is_given(self):
         self.alias({"*": "deepseek-v4.1-flash"})
