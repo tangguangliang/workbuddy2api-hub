@@ -22074,6 +22074,13 @@ class Handler(BaseHTTPRequestHandler):
                     "required": "standard",
                     "at": gate_at,
                 }
+        # Anthropic 客户端（VS Code 的 Claude agent、Anthropic SDK）按 Anthropic
+        # 形状读清单；带 `anthropic-version` 头就按那边回答，否则保持 OpenAI 形状。
+        if wants_anthropic_shape(getattr(self, "headers", None)):
+            shaped = anthropic_models_payload(data)
+            log("models    : anthropic shape, %d model(s)" % len(shaped["data"]),
+                tag="catalog")
+            return self._json(200, shaped)
         payload = {"object": "list", "data": data,
                    "realm": req_realm or CURRENT_REALM}
         # 来源说明（面板展示用）：这批清单是上游 API 实时取的，还是读的
@@ -22082,6 +22089,31 @@ class Handler(BaseHTTPRequestHandler):
         if meta:
             payload["catalog"] = meta
         return self._json(200, payload)
+
+    def _get_v1_model(self, model_id):
+        """单条模型查询（OpenAI / Anthropic 两种形状，与清单同一套判定）。"""
+        if not self._authorized():
+            return
+        model_id = str(model_id or "").strip()
+        if not model_id:
+            return self._error(404, "model not found", "invalid_request_error")
+        req_realm = self._request_realm() or CURRENT_REALM
+        try:
+            entries = fetch_models(realm=req_realm)
+        except Exception as exc:
+            return self._error(502, str(exc))
+        meta = None
+        for mid, item in entries:
+            if mid == model_id:
+                meta = item
+                break
+        if meta is None:
+            return self._error(404, "model not found: %s" % model_id,
+                               "invalid_request_error")
+        if wants_anthropic_shape(getattr(self, "headers", None)):
+            one = anthropic_models_payload([model_entry(model_id, meta)])["data"]
+            return self._json(200, one[0] if one else {})
+        return self._json(200, model_entry(model_id, meta))
 
     def _get_v1_balance_summary(self):
         if not self._authorized():
