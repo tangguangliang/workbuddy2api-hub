@@ -680,6 +680,12 @@ class MockHandler:
         self.response = (code, {"error": msg, "type": typ})
         return (code, {"error": msg})
 
+    # apply / preview 共用这两步（请求体归一化 + Key 选择）。它们只依赖本桩已经
+    # 改写的 _agents_resolve_key / _agents_models，直接借真实实现，免得处理器再
+    # 抽公共方法时这里跟着漂。
+    _agents_request_ctx = wb_proxy.Handler._agents_request_ctx
+    _agents_pick_key = wb_proxy.Handler._agents_pick_key
+
 # Patch integrate and restore targets to use our isolated home10
 orig_integrate = A.integrate
 orig_restore = A.restore
