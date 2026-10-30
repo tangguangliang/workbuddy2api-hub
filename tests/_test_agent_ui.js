@@ -122,6 +122,10 @@ const api = new Function(script + `
   window.__applyAgent = applyAgent;
   window.__restoreAgent = restoreAgent;
   window.__loadAgents = loadAgents;
+  window.__previewAgent = previewAgent;
+  window.__agentBaseUrlChoices = agentBaseUrlChoices;
+  window.__renderAgentBaseUrlSelect = renderAgentBaseUrlSelect;
+  window.__agentApplyPayload = agentApplyPayload;
   window.__setAgents = function(data, models){ AGENTS_DATA = data; AGENT_MODELS = models; };
   // 直接注入勾选态时三态要一起摆好：configured=false 会让「空集合」被读成
   // 「全都要」，只塞集合会测出一个假绿。
@@ -134,6 +138,10 @@ const api = new Function(script + `
   return { applyAgent, restoreAgent, loadAgents,
            setAgents: window.__setAgents, setSelection: window.__setSelection,
            setModelsData: window.__setModelsData,
+           previewAgent: window.__previewAgent,
+           agentBaseUrlChoices: window.__agentBaseUrlChoices,
+           renderAgentBaseUrlSelect: window.__renderAgentBaseUrlSelect,
+           agentApplyPayload: window.__agentApplyPayload,
            loadAgentsAvailability, switchMainTab,
            loadAgentModelSelection, applyModelPickAction, isModelPicked,
            syncModelPickBoxes, saveModelSelection,
@@ -357,6 +365,91 @@ const check = (label, cond, extra) => {
   const keySel = element('agentKeySelect');
   check('the key picker is populated',
         /key-1/.test(keySel.innerHTML || ''), String(keySel.innerHTML).slice(0, 160));
+
+  // ---- 网关地址是下拉框：本机 + 局域网两项，和其他两个下拉同一套控件 -----
+  api.setAgents({
+    clients: CLIENTS, keys: [], models: MODELS,
+    gateway: {base_url: 'http://127.0.0.1:8788/v1', bind: '0.0.0.0', lan_enabled: true,
+              lan_base_urls: ['http://192.168.50.188:8788/v1']},
+    model_embedding_clients: ['dsh'],
+  }, MODELS);
+  const choices = api.agentBaseUrlChoices();
+  check('地址下拉的文案就是 base_url 本身（不加「本机 / 局域网」前缀）',
+        choices.length === 2
+        && choices[0].value === 'http://127.0.0.1:8788/v1'
+        && choices[0].label === 'http://127.0.0.1:8788/v1'
+        && choices[1].label === 'http://192.168.50.188:8788/v1',
+        JSON.stringify(choices));
+
+  api.renderAgentBaseUrlSelect();
+  const baseSelect = element('agentBaseUrl');
+  const baseHtml = String(baseSelect.innerHTML || '');
+  check('下拉把两项都渲染成 option（value 与文案都是地址）',
+        /<option value="http:\/\/127\.0\.0\.1:8788\/v1">http:\/\/127\.0\.0\.1:8788\/v1<\/option>/.test(baseHtml)
+        && /<option value="http:\/\/192\.168\.50\.188:8788\/v1">http:\/\/192\.168\.50\.188:8788\/v1<\/option>/.test(baseHtml),
+        baseHtml.slice(0, 300));
+  check('网关地址是 select 而不是文本框',
+        !/<input[^>]*id="agentBaseUrl"/.test(html) && /<select id="agentBaseUrl"/.test(html));
+  check('局域网可用时不显示任何提示文案',
+        String(element('agentBaseUrlHints').innerHTML || '') === '',
+        String(element('agentBaseUrlHints').innerHTML).slice(0, 120));
+
+  api.setAgents({
+    clients: CLIENTS, keys: [], models: MODELS,
+    gateway: {base_url: 'http://127.0.0.1:8788/v1', bind: '127.0.0.1', lan_enabled: false,
+              lan_base_urls: []},
+    model_embedding_clients: ['dsh'],
+  }, MODELS);
+  api.renderAgentBaseUrlSelect();
+  check('只监听回环时下拉里没有局域网地址',
+        !/192\.168/.test(String(element('agentBaseUrl').innerHTML || '')),
+        String(element('agentBaseUrl').innerHTML).slice(0, 200));
+  check('只监听回环时说明其他设备连不上',
+        /只监听 127\.0\.0\.1/.test(element('agentBaseUrlHints').innerHTML || ''),
+        String(element('agentBaseUrlHints').innerHTML).slice(0, 200));
+
+  // ---- 查看配置：预览请求与 apply 同源，且内容真的渲染进弹窗 --------------
+  api.setAgents({
+    clients: CLIENTS, keys: [], models: MODELS,
+    gateway: {base_url: 'http://127.0.0.1:8788/v1', lan_enabled: true,
+              lan_base_urls: ['http://192.168.50.188:8788/v1']},
+    model_embedding_clients: ['dsh'],
+  }, MODELS);
+  global.fetch = (url, opts) => {
+    if (String(url).indexOf('/agents/preview') !== -1) {
+      const payload = {
+        client: 'claude-code', label: 'Claude Code', base_url: 'http://127.0.0.1:8788/v1',
+        model: 'model-a',
+        files: [{path: '/home/u/.claude/settings.json', existed: true, changed: true,
+                 content: '{\n  "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8788"}\n}'}],
+      };
+      requests.push({url: String(url), opts: opts || {}});
+      return Promise.resolve({
+        status: 200, ok: true,
+        json: () => Promise.resolve(payload),
+        text: () => Promise.resolve(JSON.stringify(payload)),
+      });
+    }
+    requests.push({url: String(url), opts: opts || {}});
+    return realFetch(url, opts);
+  };
+  requests.length = 0;
+  await api.previewAgent('claude-code', null);
+  const previewReq = requests.find(r => r.url.indexOf('/agents/preview') !== -1);
+  check('previewAgent posts to /agents/preview', !!previewReq,
+        JSON.stringify(requests.map(r => r.url)));
+  const previewBody = JSON.parse((previewReq && previewReq.opts.body) || '{}');
+  const applyBody = api.agentApplyPayload('claude-code');
+  check('preview 与 apply 用同一份请求体',
+        JSON.stringify(previewBody) === JSON.stringify(applyBody),
+        JSON.stringify(previewBody));
+  const previewBodyEl = element('agentPreviewBody');
+  check('预览把文件路径与内容渲染出来',
+        /settings\.json/.test(previewBodyEl.innerHTML || '')
+        && /ANTHROPIC_BASE_URL/.test(previewBodyEl.innerHTML || ''),
+        String(previewBodyEl.innerHTML).slice(0, 220));
+  const previewMask = element('agentPreviewMask');
+  check('预览弹窗被打开', previewMask.style.display === 'flex', JSON.stringify(previewMask.style));
 
   // 计数与卡片必须对得上（issue #250）：列表是全部支持的客户端，检测到的只是
   // 其中一部分，所以标题要把两个数字都写出来，而不是只报「已检测到」的那个。

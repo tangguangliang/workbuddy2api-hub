@@ -284,6 +284,39 @@ def realm_served_models(realm):
     return ids
 
 
+def lan_ipv4_addresses():
+    """本机非回环 IPv4 地址（局域网里其他设备该用的那个）。
+
+    UDP connect 不发包，只是让内核选出默认出口地址；拿不到时再退回
+    getaddrinfo(hostname)。两者都是本地调用，不联网。结果按出现顺序去重，
+    回环与 169.254 链路本地地址丢掉——把 `169.254.x.x` 贴给别人只会白费时间。
+    """
+    found = []
+
+    def _keep(addr):
+        addr = str(addr or "").strip()
+        if not addr or addr.startswith("127.") or addr.startswith("169.254."):
+            return
+        if addr not in found:
+            found.append(addr)
+
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("8.8.8.8", 80))
+            _keep(probe.getsockname()[0])
+        finally:
+            probe.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            _keep(info[4][0])
+    except OSError:
+        pass
+    return found
+
+
 def realm_alias_for(model, realm):
     """Stand-in model for a model the requested exit cannot serve.
 
@@ -22608,21 +22641,32 @@ class Handler(BaseHTTPRequestHandler):
         """本请求的来源地址能不能用一键配置（判定见模块级 agents_client_allowed）。"""
         return agents_client_allowed(getattr(self, "client_address", None))
 
-    def _agents_base_url_hint(self):
-        """Best guess at the URL a local client should point at.
+    def _agents_gateway_info(self):
+        """网关地址：本机回环地址 + 局域网可达地址。
 
-        Derived from the bound socket; a 0.0.0.0 bind is unreachable for a
-        client, so it is reported as 127.0.0.1 instead.
+        绑定 `0.0.0.0` 时 `server_address` 里那个地址客户端连不上，所以回环仍
+        报 127.0.0.1；同时把本机网卡上的 IPv4 一并给出——局域网里的其他机器、
+        手机要填的是后者，此前面板只显示 127.0.0.1，用户只能自己去查 IP。
         """
         host, port = "", 0
         try:
             host, port = self.server.server_address[:2]
         except Exception:
             pass
-        host = str(host or "").strip() or "127.0.0.1"
-        if host in ("0.0.0.0", "::", ""):
-            host = "127.0.0.1"
-        return "http://%s:%d/v1" % (host, int(port or 0))
+        host = str(host or "").strip()
+        port = int(port or 0)
+        lan_mode = host in ("0.0.0.0", "::", "")
+        base_host = "127.0.0.1" if (lan_mode or not host) else host
+        lan_urls = []
+        if lan_mode:
+            for addr in lan_ipv4_addresses():
+                lan_urls.append("http://%s:%d/v1" % (addr, port))
+        return {
+            "base_url": "http://%s:%d/v1" % (base_host, port),
+            "bind": host or "127.0.0.1",
+            "lan_enabled": lan_mode,
+            "lan_base_urls": lan_urls,
+        }
 
     def _agents_models(self):
         """Flat model list for the picker; bundled intl+cn catalog, deduped.
@@ -22767,7 +22811,7 @@ class Handler(BaseHTTPRequestHandler):
             "keys": keys,
             "global_key_set": bool(API_KEY),
             "auth_required": auth_required(),
-            "gateway": {"base_url": self._agents_base_url_hint()},
+            "gateway": self._agents_gateway_info(),
         })
 
     def _get_agents_model_selection(self):
@@ -22787,33 +22831,43 @@ class Handler(BaseHTTPRequestHandler):
         """
         wb_agents = agents_module()
         key_id = str(payload.get("key_id") or "").strip()
-        if key_id == "__global":
-            return API_KEY or None
         keys = configured_keys()
+        enabled = [entry for entry in keys if entry.get("enabled")]
+        if key_id == "__global":
+            # 面板里已经有 Key 时，启动器/静态 API_KEY 不再被 identify_key 接受
+            # （它只认面板 Key），把它写进客户端只会换来 401。这里退回第一把启用
+            # 的面板 Key —— 那才是客户端实际能用出去的那把。
+            if enabled:
+                return enabled[0].get("key") or None
+            return API_KEY or None
         if key_id:
             for entry in keys:
                 if entry.get("id") == key_id:
                     return entry.get("key") or None
             raise wb_agents.AgentConfigError(
                 "no configured key with id %r" % key_id)
-        # Default: the global key when set, else the first enabled panel key.
-        if API_KEY:
-            return API_KEY
-        for entry in keys:
-            if entry.get("enabled"):
-                return entry.get("key") or None
-        return None
+        # Default: a panel key wins - once the panel holds any key, identify_key
+        # stops accepting the static/launcher one. The static key is only a
+        # fallback for a panel that has none configured.
+        if enabled:
+            return enabled[0].get("key") or None
+        return API_KEY or None
 
-    def _handle_agents_apply(self, payload):
+    def _agents_request_ctx(self, payload):
+        """归一化 apply / preview 共用的请求体。
+
+        两条路必须看到**同一份** client / base_url / model / models，否则预览
+        显示的配置和真写进去的会悄悄分叉。校验失败抛 AgentConfigError，调用方
+        统一翻成 400。
+        """
         wb_agents = agents_module()
         client_id = str(payload.get("client") or payload.get("client_id") or "").strip()
         if not client_id:
-            return self._error(400, "client is required", "invalid_request_error")
+            raise wb_agents.AgentConfigError("client is required")
         base_url = str(payload.get("base_url") or "").strip()
         if not re.match(r"^https?://", base_url):
-            return self._error(
-                400, "base_url must start with http:// or https://",
-                "invalid_request_error")
+            raise wb_agents.AgentConfigError(
+                "base_url must start with http:// or https://")
         model = str(payload.get("model") or "").strip() or None
         models = payload.get("models")
         if models is None:
@@ -22825,8 +22879,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 models = [{"id": mid} for mid in selection]
         if not isinstance(models, list):
-            return self._error(400, "models must be a list",
-                               "invalid_request_error")
+            raise wb_agents.AgentConfigError("models must be a list")
         # A runaway picker must not turn into a megabyte config file.
         models = models[:80]
         cleaned_models = []
@@ -22848,24 +22901,32 @@ class Handler(BaseHTTPRequestHandler):
             specs = {}
         cleaned_models = enrich_agent_models(cleaned_models, specs)
         if not cleaned_models and client_id in MODEL_EMBEDDING_CLIENTS:
-            return self._error(
-                400,
+            raise wb_agents.AgentConfigError(
                 "请先在「网关模型清单」中勾选至少一个模型：只有勾选的模型"
-                "才会写入客户端配置",
-                "invalid_request_error")
+                "才会写入客户端配置")
+        return client_id, base_url, model, cleaned_models
+
+    def _agents_pick_key(self, payload):
+        """(api_key, warnings)，校验失败抛 AgentConfigError。"""
+        wb_agents = agents_module()
         warnings = []
-        try:
-            api_key = self._agents_resolve_key(payload, warnings)
-        except wb_agents.AgentConfigError as exc:
-            return self._error(400, str(exc), "invalid_request_error")
+        api_key = self._agents_resolve_key(payload, warnings)
         if not api_key:
             if auth_required():
-                return self._error(
-                    400, "no gateway key available - 请先配置 API Key",
-                    "invalid_request_error")
+                raise wb_agents.AgentConfigError(
+                    "no gateway key available - 请先配置 API Key")
             api_key = "wb-local"
             warnings.append("gateway has no key configured; wrote placeholder "
                             "'wb-local' (auth is off, so any value works)")
+        return api_key, warnings
+
+    def _handle_agents_apply(self, payload):
+        wb_agents = agents_module()
+        try:
+            client_id, base_url, model, cleaned_models = self._agents_request_ctx(payload)
+            api_key, warnings = self._agents_pick_key(payload)
+        except wb_agents.AgentConfigError as exc:
+            return self._error(400, str(exc), "invalid_request_error")
         try:
             result = wb_agents.integrate(
                 ACCOUNTS_DIR, client_id, base_url, api_key,
@@ -22878,6 +22939,24 @@ class Handler(BaseHTTPRequestHandler):
         log("agents apply: client=%s base_url=%s model=%s files=%d"
             % (client_id, base_url, model or "-", len(result.get("files") or [])),
             tag="agents")
+        return self._json(200, result)
+
+    def _handle_agents_preview(self, payload):
+        """把「一键配置会写出什么」渲染出来，不碰任何文件。"""
+        wb_agents = agents_module()
+        try:
+            client_id, base_url, model, cleaned_models = self._agents_request_ctx(payload)
+            api_key, warnings = self._agents_pick_key(payload)
+        except wb_agents.AgentConfigError as exc:
+            return self._error(400, str(exc), "invalid_request_error")
+        try:
+            result = wb_agents.preview(
+                client_id, base_url, api_key, model=model, models=cleaned_models)
+        except wb_agents.AgentConfigError as exc:
+            return self._error(400, str(exc), "invalid_request_error")
+        except Exception as exc:
+            return self._error(500, "agents preview failed: %s" % exc)
+        result["warnings"] = warnings
         return self._json(200, result)
 
     def _handle_agents_restore(self, payload):
@@ -24712,7 +24791,7 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             return self._handle_proxy_slots(path, payload)
-        if path in ("/agents/apply", "/agents/restore",
+        if path in ("/agents/apply", "/agents/preview", "/agents/restore",
                     "/agents/model-selection"):
             if not self._panel_ok():
                 return self._error(
@@ -24722,7 +24801,8 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             # 勾选清单只是数据、不碰本机配置目录，所以远程看板也能保存；
-            # apply / restore 改的是网关所在机器的配置文件，只允许本机操作。
+            # apply / preview / restore 读写的都是网关所在机器的配置目录，
+            # 只允许本机操作（preview 只读，但渲染出的内容含 Key，同权处理）。
             if path == "/agents/model-selection":
                 return self._handle_agents_model_selection(payload)
             if not self._agents_client_allowed():
@@ -24733,6 +24813,8 @@ class Handler(BaseHTTPRequestHandler):
                 )
             if path == "/agents/apply":
                 return self._handle_agents_apply(payload)
+            if path == "/agents/preview":
+                return self._handle_agents_preview(payload)
             return self._handle_agents_restore(payload)
         if path in ("/panel/login", "/panel/logout", "/panel/password"):
             return self._handle_panel(path)

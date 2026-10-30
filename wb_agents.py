@@ -1352,6 +1352,42 @@ def plan(client_id, base_url, api_key, model=None, models=None, home=None):
     }
 
 
+def preview(client_id, base_url, api_key, model=None, models=None, home=None):
+    """What `integrate()` would write, without touching a single file.
+
+    面板用它把「一键配置到底会写出什么」摊开给人看：apply 之后界面上只有一个
+    「已配置」徽章，要确认实际写进去的 base_url / 模型清单 / Key 只能自己去翻
+    文件。这里复用同一条 plan() 渲染管线，因此预览与真写入永远同源；`changed`
+    说明这次 apply 会不会真的改动文件（例如重复点击时通常已经是 no-op）。
+    """
+    built = plan(client_id, base_url, api_key, model=model, models=models,
+                 home=home)
+    files = []
+    for entry in built["files"]:
+        path = entry["path"]
+        try:
+            current = _read_text(path)
+        except AgentConfigError:
+            current = None
+        except OSError:
+            current = None
+        files.append({
+            "path": path,
+            "existed": entry["existed"],
+            "changed": current != entry["content"],
+            "content": entry["content"],
+            "current": current,
+            "bytes": len(entry["content"].encode("utf-8")),
+        })
+    return {
+        "client": built["client"],
+        "label": built["label"],
+        "base_url": built["base_url"],
+        "model": built["model"],
+        "files": files,
+    }
+
+
 def integrate(accounts_dir, client_id, base_url, api_key, model=None,
               models=None, home=None):
     """Point `client_id` at this gateway; returns what was written.

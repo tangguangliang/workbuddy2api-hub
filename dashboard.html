@@ -3174,6 +3174,18 @@ if(!window.__NEXT_UI__ && defaultConsoleLayout) {
     '写入各客户端配置时使用的网关地址、鉴权 Key 与默认模型。': 'The gateway URL, auth key and default model written into each client config.',
     '重新检测本机客户端': 'Re-detect local clients',
     '「全局 API Key」表示不在客户端配置里写入具体 Key，客户端沿用网关当前生效的全局 Key。': 'Global API Key means no concrete key is written into the client config; the client follows the gateway-level global key.',
+    '当前只监听 127.0.0.1，其他设备连不上；改用 start-wb-proxy-lan.bat 启动后，这里会列出局域网地址。': 'Currently listening on 127.0.0.1 only, so other devices cannot connect; start with start-wb-proxy-lan.bat and the LAN addresses will appear here.',
+    '未检测到可用的局域网 IPv4 地址。': 'No usable LAN IPv4 address detected.',
+    '查看配置': 'View config',
+    '生成的配置': 'Generated config',
+    '复制全部': 'Copy all',
+    '关闭': 'Close',
+    '将修改': 'will change',
+    '将新建': 'will create',
+    '与现有内容一致': 'already matches',
+    '该客户端没有生成任何文件。': 'This client produced no files.',
+    '预览内容包含写入客户端的 API Key，截图或转发前请留意。': 'The preview contains the API key written into the client; be careful with screenshots and forwards.',
+    '只读预览，尚未写入磁盘；「一键配置」写出的就是下面这些字节。': 'Read-only preview, nothing written yet; one-click setup writes exactly these bytes.',
     '检测到以下客户端安装在本机；点击「一键配置」即可让它改走本网关，原配置自动备份，可随时还原。': 'The following clients were detected on this machine; click One-click Setup to route it through this gateway. The original config is backed up automatically and can be restored anytime.',
     '任何支持 OpenAI 兼容或 Anthropic Messages 协议的客户端都可以手动接入本网关，把下面的地址填进客户端的 Base URL / API 地址即可；Key 到「设置」页复制。': 'Any client speaking OpenAI-compatible or Anthropic Messages protocol can join this gateway manually: paste the addresses below into the client Base URL / API URL field; copy the key from the Settings page.',
     '鉴权 Key 请前往「设置 → API Key 与出口绑定」页复制，填入客户端的 API Key / Token 字段。': 'Copy the auth key from Settings → API Key & Exit Binding and fill it into the client API Key / Token field.',
@@ -7198,10 +7210,11 @@ html[data-ui="next"] #nextContent .console-shell > main {padding:24px;max-width:
         <button class="sec mini" onclick="loadAgents(true)" title="重新检测本机客户端">刷新</button>
       </div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
-        <div style="flex:1.4;min-width:220px">
+        <div style="flex:1;min-width:220px">
           <div style="font-size:12px;color:var(--dim);margin-bottom:4px">网关地址</div>
-          <input id="agentBaseUrl" type="text" placeholder="http://127.0.0.1:8000/v1"
-                 style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
+          <select id="agentBaseUrl"
+                  style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit"></select>
+          <div id="agentBaseUrlHints" style="font-size:11.5px;color:var(--dim);margin-top:6px;line-height:1.6"></div>
         </div>
         <div style="flex:1;min-width:200px">
           <div style="font-size:12px;color:var(--dim);margin-bottom:4px">API Key</div>
@@ -7226,6 +7239,25 @@ html[data-ui="next"] #nextContent .console-shell > main {padding:24px;max-width:
       </div>
       <div id="agentCardGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px"></div>
     </section>
+
+    <!-- 「查看配置」弹窗：把一键配置实际会写出的字节摊开，只读、来自 /agents/preview -->
+    <div id="agentPreviewMask" class="modal-mask" style="display:none">
+      <div class="modal" role="dialog" aria-modal="true" style="width:min(880px,100%)">
+        <div class="modal-hd">
+          <h2 id="agentPreviewTitle">生成的配置</h2>
+          <button class="modal-x" aria-label="关闭" onclick="closeAgentPreview()">×</button>
+        </div>
+        <div class="modal-bd">
+          <div id="agentPreviewMeta" style="font-size:12px;color:var(--dim);line-height:1.7;margin-bottom:10px"></div>
+          <div style="font-size:11.5px;color:var(--warn);margin-bottom:8px">预览内容包含写入客户端的 API Key，截图或转发前请留意。</div>
+          <div id="agentPreviewBody" style="max-height:52vh;overflow:auto"></div>
+        </div>
+        <div class="modal-ft">
+          <button class="sec" onclick="closeAgentPreview()">关闭</button>
+          <button class="sec" onclick="copyAgentPreview(this)">复制全部</button>
+        </div>
+      </div>
+    </div>
 
     <section>
       <div>
@@ -17469,13 +17501,8 @@ async function loadAgents(showToast){
 }
 
 function renderAgentConnForm(){
-  // 网关地址：只在用户还没改过时填默认值，避免刷新把用户编辑冲掉。
-  const baseInput = document.getElementById('agentBaseUrl');
-  if(baseInput && !baseInput.dataset.touched){
-    const def = (AGENTS_DATA && AGENTS_DATA.gateway && AGENTS_DATA.gateway.base_url)
-      || (location.origin + '/v1');
-    baseInput.value = def;
-  }
+  // 网关地址下拉：选项随本机网卡变化重建，已选中的值保持不变。
+  renderAgentBaseUrlSelect();
   const keySel = document.getElementById('agentKeySelect');
   if(keySel){
     const prev = keySel.value;
@@ -17589,6 +17616,8 @@ function renderAgentCards(){
     const notDetected = !(c.installed || c.detected);
     const btns = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">'
       + '<button class="mini" onclick="applyAgent(&quot;' + idAttr + '&quot;, this)"' + (notDetected ? ' disabled title="未检测到该客户端"' : '') + '>' + applyLabel + '</button>'
+      + '<button class="sec mini" onclick="previewAgent(&quot;' + idAttr + '&quot;, this)"'
+      + (notDetected && !applied ? ' disabled title="未检测到该客户端"' : '') + '>查看配置</button>'
       + (applied ? '<button class="danger mini" onclick="restoreAgent(&quot;' + idAttr + '&quot;, this)">还原原始配置</button>' : '')
       + '</div>';
     return '<div style="background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:6px">'
@@ -17610,20 +17639,151 @@ function agentFindClient(id){
   return agentClients().find(c => String(c.id) === String(id)) || null;
 }
 
-async function applyAgent(id, btn){
-  const client = agentFindClient(id);
-  if(!client){ toast('未找到客户端: ' + id, 'bad'); return; }
+/* 网关地址下拉：本机回环 + 每张网卡上的局域网地址，选项文案就是 address 本身
+   （不写「本机 / 局域网」这类前缀，选中即所见，复制出来也能直接用）。做成
+   <select> 是为了与旁边两个下拉长得完全一样、高度自然一致。之前存过、但不在
+   候选里的地址（反向代理 / 自定义端口）保留成一条选项，不会被悄悄改掉。 */
+function agentBaseUrlChoices(){
+  const gw = (AGENTS_DATA && AGENTS_DATA.gateway) || {};
+  const localUrl = gw.base_url || (location.origin + '/v1');
+  const lan = Array.isArray(gw.lan_base_urls) ? gw.lan_base_urls.filter(Boolean) : [];
+  const out = [{value: localUrl, label: localUrl}];
+  lan.forEach(u => {
+    if(!out.some(o => o.value === u)) out.push({value: u, label: u});
+  });
+  return out;
+}
+
+function renderAgentBaseUrlSelect(){
+  const sel = document.getElementById('agentBaseUrl');
+  if(!sel) return;
+  const gw = (AGENTS_DATA && AGENTS_DATA.gateway) || {};
+  const prev = sel.value;
+  const choices = agentBaseUrlChoices();
+  if(prev && !choices.some(o => o.value === prev)){
+    choices.push({value: prev, label: prev});
+  }
+  sel.innerHTML = choices.map(o =>
+    '<option value="' + esc(o.value) + '">' + esc(o.label) + '</option>').join('');
+  const wanted = prev || gw.base_url || (choices[0] && choices[0].value) || '';
+  if(wanted) sel.value = wanted;
+  if(sel.selectedIndex < 0 && choices.length) sel.selectedIndex = 0;
+
+  // 只有「局域网不可用」这类需要运维动手的情况才留提示；正常情况下整行隐藏，
+  // 免得空 div 的 margin 在下拉和说明文字之间留出一条缝。
+  const hints = document.getElementById('agentBaseUrlHints');
+  if(!hints) return;
+  let warning = '';
+  if(gw.lan_enabled === false){
+    warning = '<span style="color:var(--warn)">当前只监听 127.0.0.1，其他设备连不上；'
+      + '改用 start-wb-proxy-lan.bat 启动后，这里会出现局域网地址。</span>';
+  } else if(!(gw.lan_base_urls || []).length){
+    warning = '<span style="color:var(--warn)">未检测到可用的局域网 IPv4 地址。</span>';
+  }
+  hints.innerHTML = warning;
+  if(hints.style) hints.style.display = warning ? 'block' : 'none';
+}
+
+/* apply / preview 必须用同一份请求体，否则「预览看到的」和「真写进去的」会分叉。 */
+function agentPickedModels(){
+  return (AGENT_MODELS || [])
+    .map(m => String((typeof m === 'object' ? (m.id || m.model || '') : m) || ''))
+    .filter(id => id && isModelPicked(id));
+}
+
+function agentApplyPayload(clientId){
   const baseInput = document.getElementById('agentBaseUrl');
   const keySel = document.getElementById('agentKeySelect');
   const modelSel = document.getElementById('agentModelSelect');
-  const baseUrl = baseInput ? baseInput.value.trim() : '';
+  return {
+    client: clientId,
+    client_id: clientId,
+    base_url: baseInput ? baseInput.value.trim() : '',
+    key_id: keySel ? keySel.value : '',
+    model: modelSel ? modelSel.value : '',
+    models: agentPickedModels()
+  };
+}
+
+let AGENT_PREVIEW_TEXT = '';
+
+function renderAgentPreview(client, payload, data){
+  const mask = document.getElementById('agentPreviewMask');
+  const title = document.getElementById('agentPreviewTitle');
+  const meta = document.getElementById('agentPreviewMeta');
+  const body = document.getElementById('agentPreviewBody');
+  if(!mask || !body) return;
+  const files = (data && data.files) || [];
+  if(title) title.textContent = '生成的配置 · ' + ((client && (client.label || client.id)) || payload.client);
+  const keySel = document.getElementById('agentKeySelect');
+  const keyLabel = keySel && keySel.selectedOptions && keySel.selectedOptions[0]
+    ? keySel.selectedOptions[0].textContent : '全局 API Key';
+  if(meta){
+    meta.innerHTML = '<div>网关地址: <span class="mono">' + esc(payload.base_url) + '</span></div>'
+      + '<div>API Key: <span class="mono">' + esc(keyLabel || '全局 API Key') + '</span></div>'
+      + '<div>默认模型: <span class="mono">' + esc(payload.model || '(未指定)') + '</span></div>'
+      + '<div>只读预览，尚未写入磁盘；「一键配置」写出的就是下面这些字节。</div>';
+  }
+  const parts = [];
+  AGENT_PREVIEW_TEXT = files.map(f => '# ' + f.path + '\n' + (f.content || '')).join('\n\n');
+  files.forEach(f => {
+    const state = f.changed ? (f.existed ? '将修改' : '将新建') : '与现有内容一致';
+    parts.push('<div style="margin-bottom:14px">'
+      + '<div class="mono" style="font-size:11.5px;color:var(--dim);word-break:break-all">' + esc(f.path)
+      + ' <span class="badge ' + (f.changed ? 's' : 'off') + '">' + esc(state) + '</span></div>'
+      + '<pre class="mono" style="margin:6px 0 0;padding:10px 12px;background:var(--panel2);border:1px solid var(--line);'
+      + 'border-radius:8px;overflow:auto;max-height:34vh;font-size:11.5px;line-height:1.6;white-space:pre-wrap">'
+      + esc(f.content || '') + '</pre></div>');
+  });
+  body.innerHTML = parts.length ? parts.join('')
+    : '<div style="font-size:12px;color:var(--dim)">该客户端没有生成任何文件。</div>';
+  mask.classList.add('show');
+  mask.style.display = 'flex';
+}
+
+function closeAgentPreview(){
+  const mask = document.getElementById('agentPreviewMask');
+  if(!mask) return;
+  mask.classList.remove('show');
+  mask.style.display = 'none';
+}
+
+async function copyAgentPreview(btn){
+  if(!AGENT_PREVIEW_TEXT){ toast('没有可复制的内容', 'warn'); return; }
+  try{
+    await writeClipboard(AGENT_PREVIEW_TEXT);
+    if(btn){ const old = btn.textContent; btn.textContent = '已复制'; setTimeout(() => { btn.textContent = old; }, 1600); }
+    toast('已复制生成的配置', 'ok');
+  }catch(e){ toast('复制失败: ' + e.message, 'bad'); }
+}
+
+async function previewAgent(id, btn){
+  const client = agentFindClient(id);
+  if(!client){ toast('未找到客户端: ' + id, 'bad'); return; }
+  const payload = agentApplyPayload(id);
+  if(!payload.base_url){ toast('请先填写网关地址', 'warn'); return; }
+  if(btn) btn.disabled = true;
+  try{
+    const r = await postJSON('/agents/preview', payload);
+    if(r && r.ok === false){ toast('读取配置失败: ' + (r.message || '未知错误'), 'bad'); return; }
+    renderAgentPreview(client, payload, r || {});
+  }catch(e){
+    if(!isAuthError(e)) toast('读取配置失败: ' + e.message, 'bad');
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function applyAgent(id, btn){
+  const client = agentFindClient(id);
+  if(!client){ toast('未找到客户端: ' + id, 'bad'); return; }
+  const payload = agentApplyPayload(id);
+  const baseUrl = payload.base_url;
   if(!baseUrl){ toast('请先填写网关地址', 'warn'); return; }
   // 只把「网关模型清单」里勾选的模型写进客户端（与 AGENT_MODELS 取交集，避免
   // 把不在当前模型目录里的 id 也发上去）。一个都没勾就先别发请求：后端对 DSH
   // 这类客户端收到空列表会返回 400，这里给一句更明确的下一步提示。
-  const pickedModels = (AGENT_MODELS || [])
-    .map(m => String((typeof m === 'object' ? (m.id || m.model || '') : m) || ''))
-    .filter(id => id && isModelPicked(id));
+  const pickedModels = payload.models;
   // 只有把模型清单写进自身配置的客户端（DSH / OpenCode / Crush / ZCode，
   // 后端 /agents 的 model_embedding_clients 声明）才需要「至少勾一个」；
   // Claude Code / Codex 不读这份清单，别因为没勾模型就把它们的一键配置也挡掉。
@@ -17638,14 +17798,7 @@ async function applyAgent(id, btn){
   }
   if(btn){ btn.disabled = true; }
   try {
-    const r = await postJSON('/agents/apply', {
-      client: id,
-      client_id: id,
-      base_url: baseUrl,
-      key_id: keySel ? keySel.value : '',
-      model: modelSel ? modelSel.value : '',
-      models: pickedModels
-    });
+    const r = await postJSON('/agents/apply', payload);
     if(r && (r.ok === false || r.error)){
       toast('配置失败: ' + (r.message || (r.error && r.error.message) || '未知错误'), 'bad');
     } else {
