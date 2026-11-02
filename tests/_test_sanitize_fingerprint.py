@@ -388,6 +388,52 @@ class DshFileReferenceParagraphTests(unittest.TestCase):
                      "see C:\\work\\@cache for details"):
             self.assertEqual(P.sanitize_text(text), text)
 
+    def test_codex_first_line_both_spellings_rewritten(self):
+        """Codex 0.165 起首句带上了 "tool"，旧规则空转 → 上游 11-128。
+
+        两种写法都必须改写，且只换一个名词——身份与行为不变。
+        """
+        fixed = ("You are a coding agent running in the Codex CLI application, "
+                 "a terminal-based coding assistant.")
+        variants = (
+            # 0.165+：真机实测触发 11-128 的那一句
+            "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.",
+            # 旧写法，同样必须被覆盖
+            "You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
+        )
+        for raw in variants:
+            self.assertEqual(P.sanitize_text(raw), fixed, raw)
+            # 幂等：改写后的文本再过一遍不再变化
+            self.assertEqual(P.sanitize_text(fixed), fixed)
+            # 改写后不再命中 WAF 特征短语。"You are a coding agent running in the
+            # Codex CLI" 是前缀型特征，application 版本天然以它开头，所以只校验
+            # 具体到品牌后缀的那几条。
+            for f in ("Codex CLI tool,", "Codex CLI,", "You are Claude Code",
+                      "x-anthropic-billing-header", "cc_entrypoint=", "11128"):
+                self.assertNotIn(f, fixed, (f, "still present after rewrite"))
+
+    def test_codex_first_line_rewritten_inside_system_prompt(self):
+        """嵌在真实 system prompt 中间（前后还有别的内容）也要被改写。"""
+        raw = (
+            "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.\n"
+            "You are running codex, a coding agent harness.\n"
+            "# General\n- Fix the requested work.\n"
+        )
+        out = P.sanitize_text(raw)
+        self.assertIn("Codex CLI application, a terminal-based coding assistant.", out)
+        self.assertNotIn("You are a coding agent running in the Codex CLI tool", out)
+        self.assertNotIn("You are a coding agent running in the Codex CLI,", out)
+        # 其余内容原样保留：只换一个名词，不砍 prompt
+        self.assertIn("You are running codex, a coding agent harness.", out)
+        self.assertIn("# General\n- Fix the requested work.", out)
+
+    def test_codex_first_line_rewritten_for_system_role(self):
+        """system 角色走 identity=True 分支（Codex 的指令段就在 system 里）。"""
+        raw = "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant."
+        msgs = P.sanitize_messages([{"role": "system", "content": raw}])
+        self.assertIn("Codex CLI application", msgs[0]["content"])
+        self.assertNotIn("Codex CLI tool", msgs[0]["content"])
+
 
 class CodexIntroFingerprintTests(unittest.TestCase):
     """Codex 基础提示词首段（#743）。
