@@ -88,6 +88,16 @@ REQUIRED_FILES = (
     "Lib/html/__init__.py", "Lib/http/__init__.py", "Lib/http/client.py",
     "Lib/concurrent/__init__.py", "Lib/concurrent/futures/__init__.py",
     "Lib/ctypes/__init__.py", "Lib/collections/__init__.py", "Lib/re/__init__.py",
+    # 退出取证（wb_proxy.install_exit_diagnostics）会 import traceback：
+    # 未捕获异常要靠它把栈打进日志。traceback 自己还会拉起
+    # linecache / tokenize / textwrap / contextlib / itertools / enum /
+    # functools / reprlib / keyword / operator / warnings / copyreg / codeop，
+    # 少一个就只会在崩溃那一刻才抛 ImportError——那是最不该出错的时候。
+    "Lib/traceback.py", "Lib/linecache.py", "Lib/tokenize.py", "Lib/token.py",
+    "Lib/textwrap.py", "Lib/contextlib.py", "Lib/itertools.py", "Lib/enum.py",
+    "Lib/functools.py", "Lib/reprlib.py", "Lib/keyword.py", "Lib/operator.py",
+    "Lib/warnings.py", "Lib/copyreg.py", "Lib/codeop.py", "Lib/types.py",
+    "Lib/pathlib.py", "Lib/_collections_abc.py", "Lib/genericpath.py",
     "DLLs/_socket.pyd", "DLLs/_ssl.pyd", "DLLs/_hashlib.pyd", "DLLs/_ctypes.pyd",
     "DLLs/select.pyd", "DLLs/unicodedata.pyd", "DLLs/_uuid.pyd", "DLLs/_decimal.pyd",
     "DLLs/_sqlite3.pyd",

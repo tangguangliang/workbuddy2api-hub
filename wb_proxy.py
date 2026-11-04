@@ -21922,6 +21922,15 @@ class Handler(BaseHTTPRequestHandler):
         # 同 toggle：按钮的 `{}` body 已在 do_POST 分发前排空（见 BODYLESS_PANEL_POSTS）。
         # 回响应、延迟退出：0.4s 让 _json 的 body 先 flush 到 socket；端口
         # 随进程释放，下次启动走原来的启动脚本。
+        # 这条路走 os._exit：atexit / excepthook / faulthandler 全都绕过，不记
+        # 这一行的话「面板突然连不上」事后完全看不出是被人点了关闭。
+        try:
+            log("shutdown: requested from the panel (client %s)"
+                % (self.client_address[0] if self.client_address else "?"),
+                level="INFO", tag="system")
+        except Exception:
+            pass
+
         def _bye():
             time.sleep(0.4)
             try:
@@ -27460,6 +27469,90 @@ def running_version():
     """
     return Handler.server_version.split("/", 1)[-1]
 
+def install_exit_diagnostics():
+    """装退出取证：原生崩溃栈 + 未捕获异常 + 正常退出的原因。
+
+    为什么需要：进程以 pythonw 静默启动时 stdout/stderr 都指向空设备，运行日志
+    只在内存环里。进程一非正常消失，那圈日志连同退出原因一起没了，事后只能看到
+    "面板连不上、重启就好"——正是这个仓库反复碰到的形态。
+
+    三层钩子各管一段，互不替代：
+
+      * `faulthandler` 管**原生崩溃**（段错误、C 扩展 abort）——Python 层
+        钩子在那时根本不会执行，只有它能打出一条 C 栈；
+      * `sys.excepthook` / `threading.excepthook` 管**未捕获的 Python 异常**，
+        把类型、消息和栈打进日志通道（进而进日志库）；
+      * `atexit` 管**正常退出**，记下退出码与当时的线程数。
+
+    `os._exit()` 三条都绕不过——它不跑 atexit、不触发 excepthook。所以「关闭
+    服务」按钮那条路单独记一行（见 `_route_shutdown`），不在这里兜。
+    """
+    try:
+        import faulthandler
+    except Exception:
+        faulthandler = None
+    if faulthandler is not None:
+        # 不需要真的崩溃：注册后任何致命信号都会把 C 栈写进来。pythonw 下
+        # stderr 是空设备，所以同时留一份到 LOG_DB（下面再用 log() 记一行）。
+        try:
+            faulthandler.enable()
+        except Exception:
+            pass
+
+    def _excepthook(exc_type, exc, tb):
+        try:
+            import traceback
+            detail = "".join(traceback.format_exception(exc_type, exc, tb))
+            log("FATAL: uncaught %s: %s\n%s"
+                % (exc_type.__name__, exc, detail), level="ERROR", tag="system")
+        except Exception:
+            pass
+        try:
+            flush_log_channel(1.0)
+        except Exception:
+            pass
+
+    try:
+        sys.excepthook = _excepthook
+    except Exception:
+        pass
+
+    def _thread_excepthook(args):
+        try:
+            import traceback
+            detail = "".join(traceback.format_exception(
+                args.exc_type, args.exc_value, args.exc_traceback))
+            log("FATAL: uncaught %s in thread %s: %s\n%s"
+                % (args.exc_type.__name__,
+                   getattr(args.thread, "name", "?"), args.exc_value, detail),
+                level="ERROR", tag="system")
+        except Exception:
+            pass
+
+    try:
+        import threading
+        threading.excepthook = _thread_excepthook
+    except Exception:
+        pass
+
+    def _at_exit():
+        try:
+            log("exit: interpreter is shutting down (threads=%d)"
+                % threading.active_count(), level="INFO", tag="system")
+        except Exception:
+            pass
+        try:
+            flush_log_channel(1.0)
+        except Exception:
+            pass
+
+    try:
+        import threading
+        atexit.register(_at_exit)
+    except Exception:
+        pass
+
+
 def main():
     args = _parse_cli_args()
     _apply_cli_overrides(args)
@@ -27924,4 +28017,6 @@ if __name__ == "__main__":
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+    # 越早越好：装在任何可能抛异常/崩溃的代码之前，否则前几分钟的失败照样无痕。
+    install_exit_diagnostics()
     main()
