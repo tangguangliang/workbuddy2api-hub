@@ -391,10 +391,11 @@ class DshFileReferenceParagraphTests(unittest.TestCase):
     def test_codex_first_line_both_spellings_rewritten(self):
         """Codex 0.165 起首句带上了 "tool"，旧规则空转 → 上游 11-128。
 
-        两种写法都必须改写，且只换一个名词——身份与行为不变。
+        两种写法都必须被改写。这里只钉**行为**（两种写法都被改写、结果不再含
+        WAF 指纹、幂等），不钉具体替换措辞：上游 #743 用的是整句中性化
+        ``You are a helpful AI assistant.``，早期本地补丁用的是换一个名词，
+        两者都能通过。
         """
-        fixed = ("You are a coding agent running in the Codex CLI application, "
-                 "a terminal-based coding assistant.")
         variants = (
             # 0.165+：真机实测触发 11-128 的那一句
             "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.",
@@ -402,15 +403,13 @@ class DshFileReferenceParagraphTests(unittest.TestCase):
             "You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
         )
         for raw in variants:
-            self.assertEqual(P.sanitize_text(raw), fixed, raw)
+            fixed = P.sanitize_text(raw)
+            self.assertNotEqual(fixed, raw, "the Codex intro must be rewritten: %r" % raw)
+            # 改写后不再含「身份句 + Codex CLI」的连续指纹
+            self.assertNotIn("You are a coding agent running in the Codex CLI", fixed, raw)
+            self.assertNotIn("Codex CLI tool,", fixed, raw)
             # 幂等：改写后的文本再过一遍不再变化
-            self.assertEqual(P.sanitize_text(fixed), fixed)
-            # 改写后不再命中 WAF 特征短语。"You are a coding agent running in the
-            # Codex CLI" 是前缀型特征，application 版本天然以它开头，所以只校验
-            # 具体到品牌后缀的那几条。
-            for f in ("Codex CLI tool,", "Codex CLI,", "You are Claude Code",
-                      "x-anthropic-billing-header", "cc_entrypoint=", "11128"):
-                self.assertNotIn(f, fixed, (f, "still present after rewrite"))
+            self.assertEqual(P.sanitize_text(fixed), fixed, raw)
 
     def test_codex_first_line_rewritten_inside_system_prompt(self):
         """嵌在真实 system prompt 中间（前后还有别的内容）也要被改写。"""
@@ -420,10 +419,9 @@ class DshFileReferenceParagraphTests(unittest.TestCase):
             "# General\n- Fix the requested work.\n"
         )
         out = P.sanitize_text(raw)
-        self.assertIn("Codex CLI application, a terminal-based coding assistant.", out)
         self.assertNotIn("You are a coding agent running in the Codex CLI tool", out)
         self.assertNotIn("You are a coding agent running in the Codex CLI,", out)
-        # 其余内容原样保留：只换一个名词，不砍 prompt
+        # 其余内容原样保留：只处理首句，不砍 prompt
         self.assertIn("You are running codex, a coding agent harness.", out)
         self.assertIn("# General\n- Fix the requested work.", out)
 
@@ -431,8 +429,8 @@ class DshFileReferenceParagraphTests(unittest.TestCase):
         """system 角色走 identity=True 分支（Codex 的指令段就在 system 里）。"""
         raw = "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant."
         msgs = P.sanitize_messages([{"role": "system", "content": raw}])
-        self.assertIn("Codex CLI application", msgs[0]["content"])
-        self.assertNotIn("Codex CLI tool", msgs[0]["content"])
+        self.assertNotEqual(msgs[0]["content"], raw)
+        self.assertNotIn("You are a coding agent running in the Codex CLI", msgs[0]["content"])
 
 
 class CodexIntroFingerprintTests(unittest.TestCase):
