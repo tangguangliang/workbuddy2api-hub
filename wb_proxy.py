@@ -12604,6 +12604,53 @@ def fetch_models(realm=None):
             _catalog_meta[r] = {"source": source, "fetched_at": time.time(),
                                 "file_mtime": file_mtime}
         return entries
+
+
+ANTHROPIC_MODEL_CREATED_AT = "2024-01-01T00:00:00Z"
+
+
+def wants_anthropic_shape(headers):
+    """这次请求是不是 Anthropic 客户端（带 `anthropic-version` 头）。
+
+    模块级而不是 Handler 方法：单测会拿 `object.__new__(Handler)`、甚至一个只有
+    `.headers` 的假对象去调路由，方法形式在那里就是 AttributeError。
+    """
+    if headers is None:
+        return False
+    try:
+        return bool((headers.get("anthropic-version") or "").strip())
+    except Exception:
+        return False
+
+
+def anthropic_models_payload(entries):
+    """Anthropic 形状的模型清单（`GET /v1/models`，带 `anthropic-version` 时用）。
+
+    两套形状的差别不是洁癖：Anthropic 的清单条目是
+    `{"type": "model", "id", "display_name", "created_at"}`，顶层还有 `has_more`
+    / `first_id` / `last_id`。OpenAI 形状里条目是 `object: "model"`，没有 `type`。
+    VS Code 的 Claude agent（以及 Anthropic SDK 的 `models.list()`）按 `type ==
+    "model"` 过滤，拿到 OpenAI 形状就得到空列表，界面上就是「没有模型」；Codex
+    agent 读 `object`，所以同一台机器上 Codex 有模型、Claude 没有。
+    """
+    data = []
+    for item in entries or []:
+        mid = str((item or {}).get("id") or "").strip()
+        if not mid:
+            continue
+        data.append({
+            "type": "model",
+            "id": mid,
+            "display_name": str((item or {}).get("name") or mid),
+            "created_at": ANTHROPIC_MODEL_CREATED_AT,
+        })
+    payload = {"data": data, "has_more": False}
+    if data:
+        payload["first_id"] = data[0]["id"]
+        payload["last_id"] = data[-1]["id"]
+    return payload
+
+
 def model_entry(mid, meta, realm=None):
     """Build a rich /v1/models entry from the desktop app catalog metadata.
     The OpenAI spec only names id/object/created/owned_by, so capability data is
@@ -21818,6 +21865,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_v1_balance_summary()
         if path in ("/v1/models", "/models"):
             return self._get_v1_models()
+        if path.startswith("/v1/models/") or path.startswith("/models/"):
+            # Anthropic SDK 的 models.retrieve(id) 会打这里；缺了就是 404，选模型
+            # 时可能被判成「模型不存在」。
+            return self._get_v1_model(path.rsplit("/", 1)[-1])
         if path == "/v1/media/tasks":
             return self._get_media_tasks(query)
         if path.startswith("/v1/videos/"):

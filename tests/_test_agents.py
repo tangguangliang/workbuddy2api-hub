@@ -703,7 +703,17 @@ try:
         "key_id": "",
         "model": "model-fallback-1",
     }
-    code, res = wb_proxy.Handler._handle_agents_apply(handler, apply_payload_frontend)
+    # `_agents_request_ctx` 在 payload 不带 models 时先读「网关模型清单」的勾选
+    # （wb_settings.agent_model_selection(ACCOUNTS_DIR)）。这个用例要验的是
+    # **目录兜底**，所以必须把模块级 ACCOUNTS_DIR 指向本次的临时目录：否则
+    # 开发者本机只要保存过勾选，这里就会静默走勾选分支、绕过 MockHandler 的
+    # _agents_models 桩，用例在「本机能过、CI 不能过」之间来回翻。
+    _saved_accounts_dir = wb_proxy.ACCOUNTS_DIR
+    wb_proxy.ACCOUNTS_DIR = acct10
+    try:
+        code, res = wb_proxy.Handler._handle_agents_apply(handler, apply_payload_frontend)
+    finally:
+        wb_proxy.ACCOUNTS_DIR = _saved_accounts_dir
     check("apply with client_id returns HTTP 200", code == 200, (code, res))
     # Verify OpenCode received the fallback models catalog
     opencode_cfg = os.path.join(home10, ".config", "opencode", "opencode.json")

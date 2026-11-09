@@ -136,8 +136,12 @@ class RealmAliasTests(unittest.TestCase):
         intl = P.realm_served_models("intl")
         self.assertIn("glm-5.3", cn)
         self.assertIn("deepseek-v4.1-flash", cn)
-        self.assertNotIn("gpt-5.5", cn)
-        self.assertIn("gpt-5.5", intl)
+        # 国际版独占的型号从目录里现取，别钉死具体 id：v1.10.3 把 `gpt-5.5`
+        # 下线换成了 `gpt-6-sol` / `gpt-5.6-sol` 等，写死会让这个断言随目录
+        # 一起过期。这里只要求「存在一个国际版有、国内版没有的模型」。
+        intl_only = sorted(m for m in intl if m not in cn)
+        self.assertTrue(intl_only, "the intl exit must serve at least one CN-only model")
+        self.assertNotIn(intl_only[0], cn)
 
     # -- what the handler does with it -------------------------------------
     def test_handler_rewrites_every_body_it_is_given(self):
